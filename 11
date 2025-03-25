@@ -69,3 +69,38 @@ final_model = xgb.train(best_params, dtrain_full, num_boost_round=study.best_tri
 
 # 保存模型
 final_model.save_model("xgb_regression_optuna_model.json")
+
+
+# 训练集预测
+dtrain = xgb.DMatrix(X_train, enable_categorical=True)
+train_preds = final_model.predict(dtrain)
+
+# 验证集预测
+dvalid = xgb.DMatrix(X_valid, enable_categorical=True)
+valid_preds = final_model.predict(dvalid)
+
+# 恢复训练/验证集原始结构，加上预测值
+df_train_result = X_train.copy()
+df_train_result['target'] = y_train.values
+df_train_result['matternumber'] = id_train.values
+df_train_result['predicted'] = train_preds
+
+df_valid_result = X_valid.copy()
+df_valid_result['target'] = y_valid.values
+df_valid_result['matternumber'] = id_valid.values
+df_valid_result['predicted'] = valid_preds
+
+# 如果你想把 predicted 移到最后一列（可选）
+def move_column_to_end(df, col_name):
+    cols = [c for c in df.columns if c != col_name] + [col_name]
+    return df[cols]
+
+df_train_result = move_column_to_end(df_train_result, 'predicted')
+df_valid_result = move_column_to_end(df_valid_result, 'predicted')
+
+# 可选：查看结果
+print("训练集预测结果：")
+print(df_train_result.head())
+
+print("验证集预测结果：")
+print(df_valid_result.head())
