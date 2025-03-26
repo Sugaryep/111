@@ -132,3 +132,183 @@ shap.summary_plot(shap_values_oot, X_oot)
 
 # 可选导出
 # df_oot_encoded.to_csv("oot_with_predictions.csv", index=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import shap
+import optuna
+import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import make_pipeline
+
+# ========== 1. 参数设置 ==========
+target_col = 'target'
+categorical_cols = [...]  # 例如 ['claim_type', 'state']
+feature_cols = [...]      # 用于训练的所有特征列（包含分类变量）
+
+# ========== 2. One-Hot 编码器 ==========
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore'), categorical_cols)
+    ],
+    remainder='passthrough'  # 保留数值型变量
+)
+
+def preprocess_X(X):
+    return preprocessor.transform(X)
+
+# ========== 3. 拆分数据 ==========
+X = df[feature_cols]
+y = df[target_col]
+X_train_raw, X_valid_raw, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 拟合 One-Hot 编码器
+preprocessor.fit(X_train_raw)
+
+# 变换为纯数值特征
+X_train = preprocess_X(X_train_raw)
+X_valid = preprocess_X(X_valid_raw)
+
+# ========== 4. Optuna 调参 ==========
+def objective(trial):
+    params = {
+        'objective': 'reg:squarederror',
+        'eval_metric': 'rmse',
+        'tree_method': 'hist',
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+        'max_depth': trial.suggest_int('max_depth', 3, 10),
+        'min_child_weight': trial.suggest_float('min_child_weight', 1e-3, 10.0),
+        'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+        'lambda': trial.suggest_float('lambda', 1e-3, 10.0),
+        'alpha': trial.suggest_float('alpha', 1e-3, 10.0),
+    }
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dvalid = xgb.DMatrix(X_valid, label=y_valid)
+
+    booster = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=1000,
+        evals=[(dvalid, 'valid')],
+        early_stopping_rounds=50,
+        verbose_eval=False
+    )
+
+    preds = booster.predict(dvalid)
+    return mean_squared_error(y_valid, preds, squared=False)
+
+study = optuna.create_study(direction='minimize')
+study.optimize(objective, n_trials=50)
+
+best_params = study.best_trial.params
+best_params.update({
+    'objective': 'reg:squarederror',
+    'eval_metric': 'rmse',
+    'tree_method': 'hist'
+})
+
+
+
+
+
+
+
+
+
+
+# 用全数据训练最终模型
+X_full = preprocess_X(X)
+dtrain_full = xgb.DMatrix(X_full, label=y)
+final_model = xgb.train(best_params, dtrain_full, num_boost_round=study.best_trial.number)
+
+# SHAP 分析
+explainer = shap.Explainer(final_model, X_full)
+shap_values = explainer(X_full)
+shap.summary_plot(shap_values, X_full)
+
+
+
+
+
+# 处理 OOT 数据
+X_oot_raw = df_oot[feature_cols]
+X_oot = preprocess_X(X_oot_raw)
+
+# 预测
+df_oot['predicted'] = final_model.predict(xgb.DMatrix(X_oot))
+
+# 可视化 SHAP
+explainer_oot = shap.Explainer(final_model, X_oot)
+shap_values_oot = explainer_oot(X_oot)
+shap.summary_plot(shap_values_oot, X_oot)
