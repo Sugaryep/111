@@ -66,3 +66,104 @@ plt.title('Quantile Regression (Median)')
 plt.legend()
 plt.grid(True)
 plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import QuantileRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import make_pipeline
+
+# ======= 参数设置 =======
+target_col = 'target'
+categorical_cols = [...]  # 无序分类变量，如 ['state', 'claim_type']
+feature_cols = [...]      # 所有特征列，包含分类变量
+
+# ======= 划分数据 =======
+X = df[feature_cols]
+y = df[target_col]
+X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# ======= One-Hot 编码器构建 =======
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore'), categorical_cols)
+    ],
+    remainder='passthrough'  # 保留数值型变量
+)
+
+# ======= 多个 Quantile 模型 =======
+quantiles = [0.1, 0.5, 0.9]
+models = {}
+
+for q in quantiles:
+    model = make_pipeline(
+        preprocessor,
+        QuantileRegressor(quantile=q, alpha=0, solver='highs')
+    )
+    model.fit(X_train, y_train)
+    models[q] = model
+
+# ======= 添加预测结果 =======
+for q in quantiles:
+    col_name = f'predicted_q{int(q*100)}'
+    df[col_name] = models[q].predict(X[feature_cols])
+
+
+
+
+
+
+
+
+X_oot = df_oot[feature_cols]
+for q in quantiles:
+    col_name = f'predicted_q{int(q*100)}'
+    df_oot[col_name] = models[q].predict(X_oot)
+
+
+
+
+
+
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(8, 5))
+plt.scatter(df['predicted_q50'], df[target_col], alpha=0.3)
+plt.xlabel("Predicted Median (q50)")
+plt.ylabel("Actual")
+plt.title("Quantile Regression - Median Fit")
+plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
+plt.grid()
+plt.show()
