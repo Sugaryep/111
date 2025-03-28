@@ -1,0 +1,172 @@
+import pandas as pd
+import numpy as np
+import lightgbm as lgb
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import make_pipeline
+
+# ========= 参数设置 =========
+target_col = 'target'
+categorical_cols = [...]  # 例如 ['state', 'claim_type']
+feature_cols = [...]      # 所有特征列（包括分类变量）
+quantiles = [0.1, 0.5, 0.9]  # 你要预测的分位数
+
+# ========= 构建预处理器（One-Hot） =========
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore'), categorical_cols)
+    ],
+    remainder='passthrough'
+)
+
+# ========= 拆分训练集 & 编码 =========
+X = df[feature_cols]
+y = df[target_col]
+X_train_raw, X_valid_raw, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 拟合编码器
+preprocessor.fit(X_train_raw)
+X_train = preprocessor.transform(X_train_raw)
+X_valid = preprocessor.transform(X_valid_raw)
+
+# 获取特征名
+feature_names = preprocessor.get_feature_names_out()
+
+# ========= 训练多个分位数模型 =========
+models = {}
+for q in quantiles:
+    model = lgb.LGBMRegressor(objective='quantile', alpha=q, n_estimators=200, learning_rate=0.1)
+    model.fit(X_train, y_train)
+    models[q] = model
+
+# ========= 添加预测结果到验证集 =========
+df_valid = X_valid_raw.copy()
+for q in quantiles:
+    pred = models[q].predict(X_valid)
+    df_valid[f'pred_q{int(q*100)}'] = pred
+
+df_valid['actual'] = y_valid.values
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+X_oot_raw = df_oot[feature_cols]
+X_oot = preprocessor.transform(X_oot_raw)
+
+df_oot_out = df_oot.copy()
+for q in quantiles:
+    df_oot_out[f'pred_q{int(q*100)}'] = models[q].predict(X_oot)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+plt.figure(figsize=(8, 5))
+plt.scatter(df_valid['pred_q50'], df_valid['actual'], alpha=0.4, label='Median prediction')
+plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
+plt.xlabel('Predicted (q50)')
+plt.ylabel('Actual')
+plt.title('Quantile Regression - Median')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+importances_df = pd.DataFrame()
+
+for q in quantiles:
+    model = models[q]
+    importances = model.feature_importances_
+    temp_df = pd.DataFrame({
+        'Feature': feature_names,
+        'Importance': importances,
+        'Quantile': f'q{int(q * 100)}'
+    })
+    importances_df = pd.concat([importances_df, temp_df], axis=0)
+
+
+
+
+
+
+
+
+
+
+
+
+# 举例：画中位数 (q=0.5) 的变量重要性
+import seaborn as sns
+
+q50_df = importances_df[importances_df['Quantile'] == 'q50'].sort_values(by='Importance', ascending=False)
+
+plt.figure(figsize=(10, 6))
+sns.barplot(data=q50_df.head(20), x='Importance', y='Feature')
+plt.title('Top 20 Feature Importance (q50)')
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import shap
+
+# 用中位数模型解释 SHAP
+shap_model = models[0.5]  # q=0.5
+X_shap = X_train  # 如果你想分析训练集
+explainer = shap.Explainer(shap_model.predict, X_shap, feature_names=feature_names)
+shap_values = explainer(X_shap)
+
+# Summary Plot
+shap.summary_plot(shap_values, features=X_shap, feature_names=feature_names)
