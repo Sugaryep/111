@@ -170,3 +170,107 @@ shap_values = explainer(X_shap)
 
 # Summary Plot
 shap.summary_plot(shap_values, features=X_shap, feature_names=feature_names)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import optuna
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import numpy as np
+
+# 假设你已有：
+# - df：你的数据
+# - feature_cols：特征列名列表
+# - categorical_cols：分类变量列名列表
+# - target_col：目标变量列名
+# - preprocessor：已拟合好的 OneHot ColumnTransformer
+
+# 分位数目标
+quantile_target = 0.5
+
+# 编码数据
+X = df[feature_cols]
+y = df[target_col]
+X_train_raw, X_valid_raw, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
+
+preprocessor.fit(X_train_raw)
+X_train = preprocessor.transform(X_train_raw)
+X_valid = preprocessor.transform(X_valid_raw)
+
+# ========================
+# Optuna 目标函数
+# ========================
+def objective(trial):
+    params = {
+        'objective': 'quantile',
+        'alpha': quantile_target,
+        'n_estimators': 1000,
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
+        'max_depth': trial.suggest_int('max_depth', 3, 10),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
+        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+        'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 10.0),
+        'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 10.0),
+        'verbosity': -1
+    }
+
+    model = lgb.LGBMRegressor(**params)
+    model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)],
+              early_stopping_rounds=50, verbose=False)
+
+    preds = model.predict(X_valid)
+    rmse = mean_squared_error(y_valid, preds, squared=False)
+    return rmse
+
+# ========================
+# 运行调参
+# ========================
+study = optuna.create_study(direction='minimize')
+study.optimize(objective, n_trials=50)
+
+# ========================
+# 输出最佳参数
+# ========================
+print("Best RMSE:", study.best_value)
+print("Best Parameters:", study.best_params)
+
+# ========================
+# 用最佳参数训练最终模型
+# ========================
+best_params = study.best_params
+best_params.update({
+    'objective': 'quantile',
+    'alpha': quantile_target
+})
+
+final_model = lgb.LGBMRegressor(**best_params)
+final_model.fit(preprocessor.transform(X), y)
+
+# 预测示例
+df['predicted_q50'] = final_model.predict(preprocessor.transform(X))
