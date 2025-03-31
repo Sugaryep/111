@@ -1,0 +1,133 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import optuna
+import re
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import mean_squared_error
+
+# ===== 参数定义 =====
+target_col = 'target'
+matternumber_col = 'matternumber'
+categorical_cols = [...]         # e.g. ['state', 'claim_type']
+feature_cols = [...]             # 不含 target 和 matternumber
+quantiles = [0.1, 0.5, 0.9]      # 想建模的分位数
+df_model = df.copy()
+df_oot = df_oot.copy()
+
+# ===== 预处理：训练集与 OOT 合并编码器一致 =====
+X_raw = df_model[feature_cols]
+y = df_model[target_col]
+matters = df_model[matternumber_col]
+
+X_train_raw, X_valid_raw, y_train, y_valid, id_train, id_valid = train_test_split(
+    X_raw, y, matters, test_size=0.2, random_state=42
+)
+
+preprocessor = ColumnTransformer([
+    ('cat', OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore'), categorical_cols)
+], remainder='passthrough')
+
+preprocessor.fit(X_train_raw)
+
+X_train = preprocessor.transform(X_train_raw)
+X_valid = preprocessor.transform(X_valid_raw)
+X_all = preprocessor.transform(X_raw)
+X_oot = preprocessor.transform(df_oot[feature_cols])
+
+feature_names = preprocessor.get_feature_names_out()
+feature_names = [re.sub(r'[^\w]', '_', name) for name in feature_names]
+
+# ===== 自定义 Quantile 损失 =====
+def quantile_loss(q):
+    def loss(preds, dtrain):
+        labels = dtrain.get_label()
+        errors = labels - preds
+        grad = np.where(errors < 0, q - 1, q)
+        hess = np.ones_like(labels)
+        return grad, hess
+    return loss
+
+# ===== 主训练函数（多分位） =====
+def train_quantile_models(quantiles, X_train, y_train, X_valid, y_valid, X_all, y_all, X_oot, feature_names):
+    models = {}
+    preds_train = pd.DataFrame()
+    preds_oot = pd.DataFrame()
+
+    for q in quantiles:
+        print(f"\n===== Tuning for quantile {q} =====")
+
+        def objective(trial):
+            params = {
+                'max_depth': trial.suggest_int('max_depth', 3, 10),
+                'eta': trial.suggest_float('eta', 0.01, 0.3),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                'lambda': trial.suggest_float('lambda', 1e-3, 10.0),
+                'alpha': trial.suggest_float('alpha', 1e-3, 10.0),
+                'objective': 'reg:squarederror',
+                'eval_metric': 'mae',
+                'verbosity': 0
+            }
+
+            dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
+            dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=feature_names)
+
+            booster = xgb.train(
+                params=params,
+                dtrain=dtrain,
+                num_boost_round=1000,
+                evals=[(dvalid, 'valid')],
+                obj=quantile_loss(q),
+                early_stopping_rounds=50,
+                verbose_eval=False
+            )
+
+            preds = booster.predict(dvalid)
+            return mean_squared_error(y_valid, preds, squared=False)
+
+        study = optuna.create_study(direction='minimize')
+        study.optimize(objective, n_trials=50)
+
+        best_params = study.best_trial.params
+        best_params.update({
+            'objective': 'reg:squarederror',
+            'eval_metric': 'mae'
+        })
+
+        dtrain_all = xgb.DMatrix(X_all, label=y_all, feature_names=feature_names)
+        final_model = xgb.train(
+            best_params,
+            dtrain_all,
+            num_boost_round=study.best_trial.number,
+            obj=quantile_loss(q)
+        )
+
+        models[q] = final_model
+
+        # 预测训练集
+        preds_train[f'predicted_q{int(q*100)}'] = final_model.predict(dtrain_all)
+
+        # 预测 OOT
+        doot = xgb.DMatrix(X_oot, feature_names=feature_names)
+        preds_oot[f'predicted_q{int(q*100)}'] = final_model.predict(doot)
+
+    return models, preds_train, preds_oot
+
+# ===== 调用主函数 =====
+models, preds_train, preds_oot = train_quantile_models(
+    quantiles, X_train, y_train, X_valid, y_valid, X_all, y, X_oot, feature_names
+)
+
+# ===== 合并预测结果 =====
+df_model = df_model.reset_index(drop=True)
+df_oot = df_oot.reset_index(drop=True)
+
+df_model = pd.concat([df_model, preds_train], axis=1)
+df_oot = pd.concat([df_oot, preds_oot], axis=1)
+
+# ===== 可选输出检查 =====
+print(df_model[[matternumber_col, target_col] + list(preds_train.columns)].head())
+print(df_oot[[matternumber_col] + list(preds_oot.columns)].head())
