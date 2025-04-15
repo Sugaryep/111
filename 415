@@ -1,0 +1,107 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import optuna
+import re
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import mean_squared_error
+
+# ==== 参数设置 ====
+quantiles = [0.15, 0.5, 0.9]
+target_col = 'target'
+categorical_cols = [...]     # 分类变量列名
+feature_cols = [...]         # 用于建模的所有特征列（不包含 target）
+df = df.copy()
+
+# ==== 拆分数据 ====
+X_raw = df[feature_cols]
+y = df[target_col]
+X_train_raw, X_valid_raw, y_train, y_valid = train_test_split(X_raw, y, test_size=0.2, random_state=42)
+
+# ==== One-Hot 编码 ====
+preprocessor = ColumnTransformer([
+    ('cat', OneHotEncoder(drop='first', sparse=False, handle_unknown='ignore'), categorical_cols)
+], remainder='passthrough')
+
+preprocessor.fit(X_train_raw)
+X_train = preprocessor.transform(X_train_raw)
+X_valid = preprocessor.transform(X_valid_raw)
+feature_names = preprocessor.get_feature_names_out()
+feature_names = [re.sub(r'[^\w]', '_', name) for name in feature_names]
+
+# ==== 自定义 Quantile Loss ====
+def quantile_loss(q):
+    def loss(preds, dtrain):
+        labels = dtrain.get_label()
+        errors = labels - preds
+        grad = np.where(errors < 0, q - 1, q)
+        hess = np.ones_like(labels)
+        return grad, hess
+    return loss
+
+# ==== 调参 + 训练模型 ====
+models = {}
+best_params_all = {}
+
+for q in quantiles:
+    print(f"\n===== Tuning for quantile {q} =====")
+
+    def objective(trial):
+        params = {
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'eta': trial.suggest_float('eta', 0.01, 0.3),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'lambda': trial.suggest_float('lambda', 1e-3, 10.0),
+            'alpha': trial.suggest_float('alpha', 1e-3, 10.0),
+            'objective': 'reg:squarederror',
+            'eval_metric': 'mae',
+            'verbosity': 0
+        }
+
+        dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
+        dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=feature_names)
+
+        booster = xgb.train(
+            params=params,
+            dtrain=dtrain,
+            num_boost_round=1000,
+            evals=[(dvalid, 'valid')],
+            obj=quantile_loss(q),
+            early_stopping_rounds=50,
+            verbose_eval=False
+        )
+
+        preds = booster.predict(dvalid)
+        return mean_squared_error(y_valid, preds, squared=False)
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=40)
+
+    best_params = study.best_trial.params
+    best_params.update({
+        'objective': 'reg:squarederror',
+        'eval_metric': 'mae'
+    })
+
+    dtrain_all = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
+    final_model = xgb.train(
+        best_params,
+        dtrain_all,
+        num_boost_round=study.best_trial.number,
+        obj=quantile_loss(q)
+    )
+
+    models[q] = final_model
+    best_params_all[q] = best_params
+
+# ==== 预测验证集并整理输出 ====
+df_valid = X_valid_raw.copy()
+for q in quantiles:
+    dvalid_pred = xgb.DMatrix(X_valid, feature_names=feature_names)
+    df_valid[f'pred_q{int(q*100)}'] = models[q].predict(dvalid_pred)
+
+df_valid['actual'] = y_valid.values
+df_valid.head()
