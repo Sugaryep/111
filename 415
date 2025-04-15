@@ -105,3 +105,58 @@ for q in quantiles:
 
 df_valid['actual'] = y_valid.values
 df_valid.head()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import xgboost as xgb
+import numpy as np
+
+# 自定义 quantile loss
+def quantile_loss(q):
+    def loss(preds, dtrain):
+        labels = dtrain.get_label()
+        errors = labels - preds
+        grad = np.where(errors < 0, q - 1, q)
+        hess = np.ones_like(labels)
+        return grad, hess
+    return loss
+
+models = {}
+for q in quantiles:
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    model = xgb.train(
+        params={
+            'max_depth': 6,
+            'eta': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'eval_metric': 'mae',
+            'verbosity': 0
+        },
+        dtrain=dtrain,
+        num_boost_round=200,
+        obj=quantile_loss(q)
+    )
+    models[q] = model
+
+# 预测验证集
+df_valid = X_valid_raw.copy()
+dvalid = xgb.DMatrix(X_valid)
+
+for q in quantiles:
+    pred = models[q].predict(dvalid)
+    df_valid[f'pred_q{int(q*100)}'] = pred
+
+df_valid['actual'] = y_valid.values
